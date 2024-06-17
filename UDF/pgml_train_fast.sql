@@ -1,23 +1,26 @@
-create or replace function aisql.train_onnx(project_name text, task text, algorithm text, relation_name text,
+create or replace function aisql.train_fast(project_name text, task text, algorithm text, relation_name text,
                                             hyperparams text default '{}', search text default NULL,
                                             search_params text default '{}', search_args text default '{}',
                                             preprocess text default '{}')
                                             returns table(project_id integer, model_name text, algorithm text) as $$
 import json
 import numpy as np
+import pickle
 from cn_clip.global_def import dataset_map, algorithm_map, cv_search_map, preprocessor_map
 from sklearn.model_selection import cross_validate
-from skl2onnx.common.data_types import FloatTensorType
-from onnxmltools import convert_sklearn, convert_catboost, convert_lightgbm, convert_xgboost
+from thrift.protocol import TBinaryProtocol
+from thrift.transport import TSocket
+from thrift.transport import TTransport
 
 plpy.info(project_name)
+plpy.info(preprocess)
 pp_map = json.loads(preprocess)
 
-rv = plpy.execute("select nextval('aisql.onnx_prj_seq') as pid")
+rv = plpy.execute("select nextval('aisql.fast_prj_seq') as pid")
 max_pid = rv[0]["pid"]
-plan1 = plpy.prepare("insert into aisql.onnx_projects(id, project_name, relation_name, model_names, score) " +
+plan1 = plpy.prepare("insert into aisql.fast_projects(id, project_name, relation_name, model_names, score) " +
                      "values($1, $2, $3, $4, $5)", ["integer", "varchar", "varchar", "varchar[]", "float8"])
-plan2 = plpy.prepare("insert into aisql.onnx_prj_models(project_id, model_name, algorithm, model_data) " +
+plan2 = plpy.prepare("insert into aisql.fast_prj_models(project_id, model_name, algorithm, model_data) " +
                      "values($1, $2, $3, $4)", ["integer", "varchar", "varchar", "bytea"])
 
 # plpy.info(model_name)
@@ -53,15 +56,16 @@ for pname, params in pp_map.items():
     pp = preprocessor(**params)
     pp.fit(X, y)
     alg_name = pname + ":" + json.dumps(params)
-    onnx = convert_sklearn(pp, pname, [("features", FloatTensorType([None, X.shape[1]]))])
-    bin_data = onnx.SerializeToString()
+    bin_data = pickle.dumps(pp)
     plpy.execute(plan2, [max_pid, pname, alg_name, bin_data])
     model_names.append(pname)
     model_recs.append((max_pid, pname, alg_name))
     X = pp.transform(X)
 
 alg = algorithm_map[task][algorithm](**json.loads(hyperparams))
-if search is None:
+if algorithm == "catboost":
+    test_score = 10  # Todo for CatBoost, use CatBoost as default
+elif search is None:
     scores = cross_validate(alg, X, y)
     test_score = np.average(scores['test_score'])
 else:
@@ -75,16 +79,12 @@ else:
     best_param = cv_search.best_params_
     alg.set_params(**best_param)
 
-alg.fit(X, y)
-if algorithm == "xgboost":
-    onnx = convert_xgboost(alg, algorithm, [("features", FloatTensorType([None, X.shape[1]]))])
-elif algorithm == "lightgbm":
-    onnx = convert_lightgbm(alg, algorithm, [("features", FloatTensorType([None, X.shape[1]]))])
-elif algorithm == "catboost":
-    onnx = convert_catboost(alg, algorithm)
+# plpy.info(algorithm)
+if algorithm == "catboost":
+    alg.fit(X, y, cat_features=[], silent=True)
 else:
-    onnx = convert_sklearn(alg, algorithm, [("features", FloatTensorType([None, X.shape[1]]))])
-bin_data = onnx.SerializeToString()
+    alg.fit(X, y)
+bin_data = pickle.dumps(alg)
 plpy.execute(plan1, [max_pid, project_name, relation_name, model_names, test_score])
 
 model_name = f"{task}:{algorithm}"

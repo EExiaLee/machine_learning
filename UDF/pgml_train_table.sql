@@ -83,22 +83,21 @@ for index in range(len(x_column_names)):
 X = np.concatenate(columns, axis=1)
 
 alg = algorithm_map[task][algorithm](**json.loads(hyperparams))
-if cat_columns is None:
-    if search is None:
-        scores = cross_validate(alg, X, y)
-        test_score = np.average(scores['test_score'])
-    else:
-        args = json.loads(search_args)
-        if search == "random" and "n_iter" in args:
-            cv_search = cv_search_map[search](alg, json.loads(search_params), n_iter=args["n_iter"])
-        else:
-            cv_search = cv_search_map[search](alg, json.loads(search_params))
-        cv_search.fit(X, y)
-        test_score = cv_search.best_score_
-        best_param = cv_search.best_params_
-        alg.set_params(**best_param)
-else:
+if cat_columns is not None:
     test_score = 10  # Todo for CatBoost, use CatBoost as default
+elif search is None:
+    scores = cross_validate(alg, X, y)
+    test_score = np.average(scores['test_score'])
+else:
+    args = json.loads(search_args)
+    if search == "random" and "n_iter" in args:
+        cv_search = cv_search_map[search](alg, json.loads(search_params), n_iter=args["n_iter"])
+    else:
+        cv_search = cv_search_map[search](alg, json.loads(search_params))
+    cv_search.fit(X, y)
+    test_score = cv_search.best_score_
+    best_param = cv_search.best_params_
+    alg.set_params(**best_param)
 
 if cat_columns is None:
     plpy.execute(plan1, [max_pid, project_name, relation_name, x_column_names, y_column_name, [], model_names, test_score])
